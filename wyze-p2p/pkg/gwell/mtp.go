@@ -115,7 +115,7 @@ func BuildMeterAckFromRequest(reqPayload []byte) []byte {
 func BuildMeterProbe(linkID uint32, srcID uint64, dstID uint64, round uint32) []byte {
 	probe := make([]byte, 68)
 	probe[0] = 0x00
-	probe[1] = 0x01 // meter request/probe
+	probe[1] = 0x01                                   // meter request/probe
 	binary.LittleEndian.PutUint16(probe[2:4], 0x0044) // length = 68
 	binary.LittleEndian.PutUint32(probe[4:8], linkID)
 	binary.LittleEndian.PutUint64(probe[12:20], srcID)
@@ -162,7 +162,7 @@ func BuildAVStreamCtlINITREQ(sessionID uint32, connType uint32, callAction uint3
 	binary.LittleEndian.PutUint16(buf[2:4], 0x004C)
 	binary.LittleEndian.PutUint32(buf[4:8], sessionID)
 	binary.LittleEndian.PutUint32(buf[8:12], 1)  // cmd = INITREQ
-	binary.LittleEndian.PutUint32(buf[12:16], 0)  // reason
+	binary.LittleEndian.PutUint32(buf[12:16], 0) // reason
 	binary.LittleEndian.PutUint32(buf[16:20], connType)
 	binary.LittleEndian.PutUint32(buf[20:24], callAction)
 	if len(avKey) >= 32 {
@@ -444,18 +444,94 @@ func FeedMTPToKCP(buf []byte, n int, dataKCP, ctrlKCP *KCPConn, convData, convCt
 	return sessCmd
 }
 
-// DecryptMTPPayload decrypts an MTP session TLV frame received via KCP.
+type DecodedPayload struct {
+	FrameType  byte
+	Flags      byte
+	Channel    string
+	Payload    []byte
+	IsHeadInfo bool
+	PacketType byte
+	Video      []byte
+	Audio      []byte
+	AudioHint  string
+	AudioSkip  int
+	AudioType  byte
+	AudioRate  uint32
+	AudioCount int
+	VideoLen   int
+}
+
+func decodeGWELLAVPayload(avPayload []byte, decoded *DecodedPayload) bool {
+	if len(avPayload) < 28 {
+		return false
+	}
+	if avPayload[0] != 0xFF || avPayload[1] != 0xFF || avPayload[2] != 0xFF || avPayload[3] != 0x88 {
+		return false
+	}
+	packetType := avPayload[5]
+	decoded.PacketType = packetType
+	decoded.Payload = append([]byte(nil), avPayload...)
+	decoded.IsHeadInfo = true
+	decoded.Video = append([]byte(nil), avPayload[28:]...)
+
+	switch packetType {
+	case 0x01:
+		if len(avPayload) >= 28 {
+			decoded.AudioType = avPayload[8]
+			decoded.AudioRate = binary.LittleEndian.Uint32(avPayload[16:20])
+			decoded.AudioHint = fmt.Sprintf("header audio_type=%d rate=%d", decoded.AudioType, decoded.AudioRate)
+		}
+		return true
+	case 0x00:
+		audioCount := int(binary.LittleEndian.Uint16(avPayload[6:8]))
+		videoLen := int(binary.LittleEndian.Uint32(avPayload[8:12]))
+		decoded.AudioCount = audioCount
+		decoded.VideoLen = videoLen
+		off := 28
+		lensBytes := audioCount * 2
+		if audioCount < 0 || off+lensBytes > len(avPayload) {
+			return true
+		}
+		lengths := make([]int, audioCount)
+		for i := 0; i < audioCount; i++ {
+			lengths[i] = int(binary.LittleEndian.Uint16(avPayload[off+i*2 : off+i*2+2]))
+		}
+		off += lensBytes
+		if audioCount > 0 {
+			var audio []byte
+			for _, n := range lengths {
+				if n <= 0 || off+n > len(avPayload) {
+					break
+				}
+				audio = append(audio, avPayload[off:off+n]...)
+				off += n
+			}
+			if len(audio) > 0 {
+				decoded.Audio = audio
+				decoded.AudioHint = "packet-type-0"
+			}
+		}
+		if videoLen > 0 && off+videoLen <= len(avPayload) {
+			decoded.Video = append(decoded.Video[:0], avPayload[off:off+videoLen]...)
+		}
+		return true
+	default:
+		return true
+	}
+}
+
+// DecodeMTPPayload decrypts an MTP session TLV frame received via KCP.
 // Format: [type(1)][flags(1)][total_len(2, LE)][RC5-encrypted payload...]
-// Returns decoded H.264 data for type=0x04 AV frames, or nil.
-func DecryptMTPPayload(data []byte, rc5Key *RC5Key, channel string) []byte {
+func DecodeMTPPayload(data []byte, rc5Key *RC5Key, channel string) *DecodedPayload {
 	if len(data) < 4 {
 		return nil
 	}
 	frameType := data[0]
+	flags := data[1]
 	totalLen := int(binary.LittleEndian.Uint16(data[2:4]))
 
 	if frameType == 0x03 {
-		return nil // AVSTREAMCTL not encrypted, no H.264
+		return &DecodedPayload{FrameType: frameType, Flags: flags, Channel: channel}
 	}
 	if frameType != 0x02 && frameType != 0x04 {
 		return nil
@@ -474,23 +550,47 @@ func DecryptMTPPayload(data []byte, rc5Key *RC5Key, channel string) []byte {
 		rc5Key.DecryptBlock(data[off : off+8])
 	}
 
-	// Extract H.264 from AV data
+	decoded := &DecodedPayload{FrameType: frameType, Flags: flags, Channel: channel}
+
+	// Extract H.264 from AV data and keep the recurring 0xffffff88 0x0800...
+	// payload family for GWell audio handling.
 	if frameType == 0x04 && channel == "DATA" {
 		avPayload := data[4:]
 		if totalLen > 4 && totalLen <= len(data) {
 			avPayload = data[4:totalLen]
 		}
+		if decodeGWELLAVPayload(avPayload, decoded) {
+			return decoded
+		}
+		decoded.Payload = append([]byte(nil), avPayload...)
 		if len(avPayload) >= 28 && avPayload[0] == 0xFF && avPayload[1] == 0xFF &&
 			avPayload[2] == 0xFF && avPayload[3] == 0x88 {
+			decoded.IsHeadInfo = true
 			h264Data := avPayload[28:]
 			if len(h264Data) > 0 {
-				return h264Data
+				decoded.Video = append([]byte(nil), h264Data...)
 			}
 		} else if len(avPayload) > 0 {
-			return avPayload
+			decoded.Video = append([]byte(nil), avPayload...)
 		}
+		return decoded
 	}
-	return nil
+
+	if totalLen > 4 && totalLen <= len(data) {
+		decoded.Payload = append([]byte(nil), data[4:totalLen]...)
+	} else if len(data) > 4 {
+		decoded.Payload = append([]byte(nil), data[4:]...)
+	}
+	return decoded
+}
+
+// DecryptMTPPayload is kept for compatibility with older callers.
+func DecryptMTPPayload(data []byte, rc5Key *RC5Key, channel string) []byte {
+	decoded := DecodeMTPPayload(data, rc5Key, channel)
+	if decoded == nil {
+		return nil
+	}
+	return decoded.Video
 }
 
 // ParseMTPForAVSTREAMCTL parses an MTP frame for AVSTREAMCTL commands.

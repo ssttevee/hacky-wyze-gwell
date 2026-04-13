@@ -108,12 +108,13 @@ func (f *Frame) SubTypeName() string {
 
 // SessionConfig configures a new P2P camera session.
 type SessionConfig struct {
-	Token       *AccessToken
-	ServerAddr  string       // P2P server address (auto-discovered if empty)
-	CameraLanIP string       // camera's LAN IP for direct connection
-	DeviceName  string       // target device name filter
-	H264Writer  io.Writer    // receives decoded H.264 data (optional)
-	Devices     []DeviceInfo // pre-populated device list (skips initInfo if set)
+	Token          *AccessToken
+	ServerAddr     string    // P2P server address (auto-discovered if empty)
+	CameraLanIP    string    // camera's LAN IP for direct connection
+	DeviceName     string    // target device name filter
+	H264Writer     io.Writer // receives decoded H.264 data (optional)
+	RawDataHandler func(*DecodedPayload)
+	Devices        []DeviceInfo // pre-populated device list (skips initInfo if set)
 }
 
 // Session manages the full lifecycle of a P2P camera connection.
@@ -160,10 +161,10 @@ type Session struct {
 	meterRound      uint32       // per-session meter probe round counter
 
 	// Diagnostics
-	rawUDPPkts      int64     // total raw UDP packets received during streaming
-	lastMeterRecv   time.Time // last time we received any meter frame (REQ or ACK)
-	meterReqCount   int       // incoming meter REQUESTs from camera (since last log)
-	meterAckCount   int       // incoming meter ACKs from camera (since last log)
+	rawUDPPkts    int64     // total raw UDP packets received during streaming
+	lastMeterRecv time.Time // last time we received any meter frame (REQ or ACK)
+	meterReqCount int       // incoming meter REQUESTs from camera (since last log)
+	meterAckCount int       // incoming meter ACKs from camera (since last log)
 
 	// Lifecycle
 	state  SessionState
@@ -1544,9 +1545,15 @@ func (s *Session) drainKCPRecv() {
 		s.streamPkts++
 		s.streamDataBytes += len(data)
 		if len(data) > 0 {
-			h264 := DecryptMTPPayload(data, s.mtpRC5Ctx, "DATA")
-			if h264 != nil && s.cfg.H264Writer != nil {
-				s.cfg.H264Writer.Write(h264)
+			decoded := DecodeMTPPayload(data, s.mtpRC5Ctx, "DATA")
+			if decoded == nil {
+				continue
+			}
+			if s.cfg.RawDataHandler != nil {
+				s.cfg.RawDataHandler(decoded)
+			}
+			if decoded.Video != nil && s.cfg.H264Writer != nil {
+				s.cfg.H264Writer.Write(decoded.Video)
 			}
 		}
 	}
@@ -1585,7 +1592,11 @@ func (s *Session) drainKCPRecv() {
 				log.Printf("%s AVSTREAMCTL on CTRL: action=%s(%d) reason=%d len=%d hex=%x",
 					s.prefix, avActionName, avAction, reason, len(data), data[:minInt(len(data), 40)])
 			}
-			DecryptMTPPayload(data, s.mtpRC5Ctx, "CTRL")
+			if s.cfg.RawDataHandler != nil {
+				if decoded := DecodeMTPPayload(data, s.mtpRC5Ctx, "CTRL"); decoded != nil {
+					s.cfg.RawDataHandler(decoded)
+				}
+			}
 		}
 	}
 }
