@@ -1,6 +1,6 @@
 # Native P2P Go — Implementation Status
 
-Last updated: 2026-02-25
+Last updated: 2026-04-18
 
 ## What's Done (Complete and Working)
 
@@ -27,6 +27,7 @@ Every phase of the GWell/IoTVideo P2P protocol is implemented and tested against
 - **MTP frames** — 0xC0 magic, 6-byte standard header, 14-byte extended (relay) header
 - **KCP segments** — PUSH (cmd=81), ACK (cmd=82), proper conv IDs
 - **AVSTREAMCTL** — INITREQ (76B), ACCEPT, START
+- **Player user-data / Duo PTZ** — official app-compatible CTRL-KCP send path
 - **Relay activation** — TCP relay register, UDP relay, session socket, passthrough
 
 ### 4. P2P Session State Machine (pkg/gwell/session.go)
@@ -116,6 +117,47 @@ Three discoveries were needed to get video flowing:
 4. UDP relay (via relay servers, extended MTP header with TID)
 5. PASSTHROUGH (via P2P server, GUTES 0xB9 frame wrapping)
 ```
+
+### Duo PTZ Transport Correction
+
+Earlier investigation correctly identified that:
+- `nativeSendDataToDevice(...)` is a real passthrough path
+- `iv_send_passthrough_msg` / `giot_eif_send_passthrough_msg` are real native transports
+- pcap-visible `c010...` blobs are not the raw app payload
+
+But for Wyze Duo PTZ specifically, the official app does not use that path.
+Current confirmed path:
+
+```
+GmLiveManager.setUserData(json)
+  -> MonitorPlayer.sendUserData([B)
+  -> IoTVideoPlayer.sendUserData([B)
+  -> nativeSendUserData([BZ)
+  -> ff ff ff 88 00 02 <len> <player payload>
+  -> type=0x02 CTRL-KCP command frame
+```
+
+So the earlier passthrough model was wrong for Duo PTZ, but the warning against
+replaying `c010...` transport blobs was correct.
+
+### Confirmed Duo PTZ JSON
+
+Recovered from official Wyze app command beans and UI call sites:
+
+```
+{"cmd":8,"angle":0}      // right
+{"cmd":8,"angle":90}     // down
+{"cmd":8,"angle":180}    // left
+{"cmd":8,"angle":270}    // up
+{"cmd":8,"stop":1}       // stop
+{"cmd":8,"angle":X,"once":1}
+{"cmd":9,"op":"get"}
+```
+
+Live hardware validation on the Wyze Duo now confirms:
+- `{"cmd":8,"angle":X,"once":1}` physically moves the camera
+- `{"cmd":9,"op":"get"}` returns live coordinates like `{"code":0,"x":116,"y":60}`
+- hold movement works only when `{"cmd":8,"angle":X}` is resent periodically during the hold window, followed by `{"cmd":8,"stop":1}` on release
 
 ### Token Format
 - accessToken from Wyze API = hex string
@@ -261,6 +303,8 @@ A sub-second network hiccup was causing a 40+ second outage (reconnect time incl
 - [ ] LAN TCP transport path (UDP works, TCP not yet exercised)
 - [ ] Graceful session close on SIGTERM
 - [ ] Remove debug logging from session.go/certify.go once stable
+- [x] Live-test Duo PTZ against hardware and verify returned `DuoPtzLocationBean` JSON
+- [x] Confirm tap (`once`) and repeated-send hold PTZ movement on Wyze Duo hardware
 
 ---
 

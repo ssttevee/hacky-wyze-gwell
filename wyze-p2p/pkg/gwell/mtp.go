@@ -13,6 +13,17 @@ import (
 	"time"
 )
 
+const (
+	userDataMagic0      = 0xFF
+	userDataMagic1      = 0xFF
+	userDataMagic2      = 0xFF
+	userDataMagic3      = 0x88
+	userDataInnerTarget = 0x00
+	userDataInnerType   = 0x02
+	userDataOuterType   = 0x02
+	userDataOuterFlags  = 0x02
+)
+
 // MTPPayloadOffset returns the byte offset where KCP/payload data starts in an MTP frame.
 // Standard header = 6 bytes. Extended header (relay) = 14 bytes.
 func MTPPayloadOffset(flags byte) int {
@@ -179,6 +190,39 @@ func BuildAVStreamCtlSTART(sessionID uint32) []byte {
 	binary.LittleEndian.PutUint16(buf[2:4], 0x004C)
 	binary.LittleEndian.PutUint32(buf[4:8], sessionID)
 	binary.LittleEndian.PutUint32(buf[8:12], 6)
+	return buf
+}
+
+// BuildUserDataEnvelope wraps an app payload in the same native envelope used by
+// IoTVideoPlayerImpl::sendUserData before it is queued onto the CTRL KCP path.
+// Format: ff ff ff 88 00 02 <lenLE> <payload>
+func BuildUserDataEnvelope(payload []byte) []byte {
+	buf := make([]byte, 8+len(payload))
+	buf[0] = userDataMagic0
+	buf[1] = userDataMagic1
+	buf[2] = userDataMagic2
+	buf[3] = userDataMagic3
+	buf[4] = userDataInnerTarget
+	buf[5] = userDataInnerType
+	binary.LittleEndian.PutUint16(buf[6:8], uint16(len(payload)))
+	copy(buf[8:], payload)
+	return buf
+}
+
+// BuildUserDataPayload wraps a native user-data envelope into the CTRL KCP frame
+// format used by iv_send_cmd_ringbuf.
+// Format: type=0x02, flags=0x02, total_len=<len+4>, RC5(payload)
+func BuildUserDataPayload(payload []byte, rc5Key *RC5Key) []byte {
+	buf := make([]byte, 4+len(payload))
+	buf[0] = userDataOuterType
+	buf[1] = userDataOuterFlags
+	binary.LittleEndian.PutUint16(buf[2:4], uint16(len(buf)))
+	copy(buf[4:], payload)
+	if rc5Key != nil {
+		for off := 4; off+8 <= len(buf); off += 8 {
+			rc5Key.EncryptBlock(buf[off : off+8])
+		}
+	}
 	return buf
 }
 

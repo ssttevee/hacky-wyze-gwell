@@ -540,6 +540,17 @@ func (kcp *KCPConn) Flush() {
 	kcp.flushLocked()
 }
 
+// SetSendSequence aligns the next outbound sequence number after segments were
+// sent outside this KCPConn instance.
+func (kcp *KCPConn) SetSendSequence(nextSN uint32) {
+	kcp.mu.Lock()
+	defer kcp.mu.Unlock()
+	kcp.sndNxt = nextSN
+	if len(kcp.sndBuf) == 0 {
+		kcp.sndUna = nextSN
+	}
+}
+
 // flushLocked performs the actual flush. Must be called with kcp.mu held.
 func (kcp *KCPConn) flushLocked() {
 	if kcp.Output == nil {

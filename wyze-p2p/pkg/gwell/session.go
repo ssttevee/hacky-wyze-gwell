@@ -3,6 +3,7 @@ package gwell
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -1118,6 +1119,37 @@ func (s *Session) sendMTP(data []byte) {
 	}
 }
 
+// SendUserData sends app-level user data through the same CTRL-KCP path used by
+// the official player for Duo PTZ commands.
+func (s *Session) SendUserData(payload []byte) error {
+	if s == nil {
+		return fmt.Errorf("session is nil")
+	}
+	if len(payload) == 0 {
+		return fmt.Errorf("payload is empty")
+	}
+	if s.ctrlKCP == nil || s.mtpRC5Ctx == nil {
+		return fmt.Errorf("stream control channel is not ready")
+	}
+
+	nativePayload := BuildUserDataEnvelope(payload)
+	kcpPayload := BuildUserDataPayload(nativePayload, s.mtpRC5Ctx)
+	if errCode := s.ctrlKCP.Send(kcpPayload); errCode != 0 {
+		return fmt.Errorf("queue ctrl user data: %d", errCode)
+	}
+	s.ctrlKCP.Flush()
+	return nil
+}
+
+// SendUserDataJSON marshals v to JSON and sends it over the live user-data path.
+func (s *Session) SendUserDataJSON(v any) error {
+	payload, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("marshal user data json: %w", err)
+	}
+	return s.SendUserData(payload)
+}
+
 // streamLoop sets up KCP sessions and streams H.264 video.
 func (s *Session) streamLoop() error {
 	token := s.cfg.Token
@@ -1319,6 +1351,10 @@ func (s *Session) streamLoop() error {
 	if !acceptReceived {
 		return fmt.Errorf("INITREQ: no ACCEPT after 60s")
 	}
+
+	// INITREQ was sent with manually-built KCP PUSH segments, so synchronize the
+	// live CTRL KCP sender before queueing later user-data/PTZ commands through it.
+	s.ctrlKCP.SetSendSequence(kcpSN)
 
 	// Send START via DATA KCP
 	log.Printf("%s sending START via DATA KCP", s.prefix)
