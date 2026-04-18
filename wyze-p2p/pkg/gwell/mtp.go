@@ -445,20 +445,28 @@ func FeedMTPToKCP(buf []byte, n int, dataKCP, ctrlKCP *KCPConn, convData, convCt
 }
 
 type DecodedPayload struct {
-	FrameType  byte
-	Flags      byte
-	Channel    string
-	Payload    []byte
-	IsHeadInfo bool
-	PacketType byte
-	Video      []byte
-	Audio      []byte
-	AudioHint  string
-	AudioSkip  int
-	AudioType  byte
-	AudioRate  uint32
-	AudioCount int
-	VideoLen   int
+	FrameType   byte
+	Flags       byte
+	Channel     string
+	Payload     []byte
+	IsHeadInfo  bool
+	PacketType  byte
+	Video       []byte
+	Audio       []byte
+	AudioHint   string
+	AudioSkip   int
+	HeaderFlags byte
+	AudioType   byte
+	AudioMode   byte
+	AudioWidth  byte
+	AudioRate   uint32
+	VideoFPS    byte
+	Version     byte
+	VideoWidth  uint32
+	VideoHeight uint32
+	AudioPTS    uint64
+	AudioCount  int
+	VideoLen    int
 }
 
 func decodeGWELLAVPayload(avPayload []byte, decoded *DecodedPayload) bool {
@@ -477,14 +485,34 @@ func decodeGWELLAVPayload(avPayload []byte, decoded *DecodedPayload) bool {
 	switch packetType {
 	case 0x01:
 		if len(avPayload) >= 28 {
+			decoded.HeaderFlags = avPayload[4]
 			decoded.AudioType = avPayload[8]
-			decoded.AudioRate = binary.LittleEndian.Uint32(avPayload[16:20])
-			decoded.AudioHint = fmt.Sprintf("header audio_type=%d rate=%d", decoded.AudioType, decoded.AudioRate)
+			decoded.AudioMode = avPayload[10]
+			decoded.AudioWidth = avPayload[11]
+			decoded.AudioRate = binary.LittleEndian.Uint32(avPayload[12:16])
+			decoded.VideoFPS = avPayload[19]
+			decoded.Version = avPayload[23]
+			decoded.VideoWidth = binary.LittleEndian.Uint32(avPayload[16:20])
+			decoded.VideoHeight = binary.LittleEndian.Uint32(avPayload[20:24])
+			decoded.AudioHint = fmt.Sprintf(
+				"header flags=0x%02x audio_type=%d mode=%d width=%d rate=%d fps=%d version=%d v=%dx%d",
+				decoded.HeaderFlags,
+				decoded.AudioType,
+				decoded.AudioMode,
+				decoded.AudioWidth,
+				decoded.AudioRate,
+				decoded.VideoFPS,
+				decoded.Version,
+				decoded.VideoWidth,
+				decoded.VideoHeight,
+			)
 		}
 		return true
 	case 0x00:
 		audioCount := int(binary.LittleEndian.Uint16(avPayload[6:8]))
 		videoLen := int(binary.LittleEndian.Uint32(avPayload[8:12]))
+		decoded.HeaderFlags = avPayload[4]
+		decoded.AudioPTS = binary.LittleEndian.Uint64(avPayload[20:28])
 		decoded.AudioCount = audioCount
 		decoded.VideoLen = videoLen
 		off := 28
