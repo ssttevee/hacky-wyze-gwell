@@ -1141,6 +1141,120 @@ func (s *Session) SendUserData(payload []byte) error {
 	return nil
 }
 
+// SendInnerUserData sends the Java IoTVideoPlayer.addHeader(...) payload over the
+// live user-data channel. When expectResponse is true, it uses the native
+// sequence-tracked variant used by notifyDevAppTalkStatus.
+func (s *Session) SendInnerUserData(payload []byte, expectResponse bool) error {
+	if s == nil {
+		return fmt.Errorf("session is nil")
+	}
+	if len(payload) == 0 {
+		return fmt.Errorf("payload is empty")
+	}
+	if s.ctrlKCP == nil || s.dataKCP == nil || s.mtpRC5Ctx == nil {
+		return fmt.Errorf("stream channels are not ready")
+	}
+
+	var (
+		nativePayload []byte
+		kcpPayload    []byte
+		errCode       int
+	)
+
+	if expectResponse {
+		nativePayload = BuildUserDataEnvelopeWithResponse(payload)
+		kcpPayload = BuildDataPayload(nativePayload, s.mtpRC5Ctx)
+		errCode = s.dataKCP.Send(kcpPayload)
+		if errCode != 0 {
+			return fmt.Errorf("queue data user data: %d", errCode)
+		}
+		s.dataKCP.Flush()
+		return nil
+	}
+
+	nativePayload = BuildUserDataEnvelope(payload)
+	kcpPayload = BuildUserDataPayload(nativePayload, s.mtpRC5Ctx)
+	errCode = s.ctrlKCP.Send(kcpPayload)
+	if errCode != 0 {
+		return fmt.Errorf("queue ctrl user data: %d", errCode)
+	}
+	s.ctrlKCP.Flush()
+	return nil
+}
+
+// SendDataPayload sends a prebuilt DATA-channel payload through the active GWell session.
+func (s *Session) SendDataPayload(payload []byte) error {
+	if s == nil {
+		return fmt.Errorf("session is nil")
+	}
+	if len(payload) == 0 {
+		return fmt.Errorf("payload is empty")
+	}
+	if s.dataKCP == nil || s.mtpRC5Ctx == nil {
+		return fmt.Errorf("stream data channel is not ready")
+	}
+
+	kcpPayload := BuildDataPayload(payload, s.mtpRC5Ctx)
+	if errCode := s.dataKCP.Send(kcpPayload); errCode != 0 {
+		return fmt.Errorf("queue data payload: %d", errCode)
+	}
+	s.dataKCP.Flush()
+	return nil
+}
+
+func (s *Session) SendDataPayloadWithFlags(payload []byte, flags byte) error {
+	if s == nil {
+		return fmt.Errorf("session is nil")
+	}
+	if len(payload) == 0 {
+		return fmt.Errorf("payload is empty")
+	}
+	if s.dataKCP == nil || s.mtpRC5Ctx == nil {
+		return fmt.Errorf("stream data channel is not ready")
+	}
+
+	kcpPayload := BuildDataPayloadWithFlags(payload, flags, s.mtpRC5Ctx)
+	if errCode := s.dataKCP.Send(kcpPayload); errCode != 0 {
+		return fmt.Errorf("queue data payload: %d", errCode)
+	}
+	s.dataKCP.Flush()
+	return nil
+}
+
+func (s *Session) SendRawDataKCPPayload(payload []byte) error {
+	if s == nil {
+		return fmt.Errorf("session is nil")
+	}
+	if len(payload) == 0 {
+		return fmt.Errorf("payload is empty")
+	}
+	if s.dataKCP == nil {
+		return fmt.Errorf("stream data channel is not ready")
+	}
+	if errCode := s.dataKCP.Send(payload); errCode != 0 {
+		return fmt.Errorf("queue raw data kcp payload: %d", errCode)
+	}
+	s.dataKCP.Flush()
+	return nil
+}
+
+func (s *Session) SendRawCtrlKCPPayload(payload []byte) error {
+	if s == nil {
+		return fmt.Errorf("session is nil")
+	}
+	if len(payload) == 0 {
+		return fmt.Errorf("payload is empty")
+	}
+	if s.ctrlKCP == nil {
+		return fmt.Errorf("stream control channel is not ready")
+	}
+	if errCode := s.ctrlKCP.Send(payload); errCode != 0 {
+		return fmt.Errorf("queue raw ctrl kcp payload: %d", errCode)
+	}
+	s.ctrlKCP.Flush()
+	return nil
+}
+
 // SendUserDataJSON marshals v to JSON and sends it over the live user-data path.
 func (s *Session) SendUserDataJSON(v any) error {
 	payload, err := json.Marshal(v)

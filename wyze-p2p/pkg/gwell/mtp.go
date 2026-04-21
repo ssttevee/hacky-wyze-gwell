@@ -20,9 +20,26 @@ const (
 	userDataMagic3      = 0x88
 	userDataInnerTarget = 0x00
 	userDataInnerType   = 0x02
+	userDataInnerTypeEx = 0x03
 	userDataOuterType   = 0x02
 	userDataOuterFlags  = 0x02
+	dataOuterType       = 0x04
+	dataOuterFlags      = 0x02
 )
+
+type GWELLAVHeader struct {
+	AudioType            uint32
+	AudioCodecOption     uint32
+	AudioMode            uint32
+	AudioBitWidth        uint32
+	AudioSampleRate      uint32
+	AudioSamplesPerFrame uint32
+	VideoType            uint32
+	FrameRate            uint32
+	Width                uint32
+	Height               uint32
+	SendAudioSampleRate  uint32
+}
 
 // MTPPayloadOffset returns the byte offset where KCP/payload data starts in an MTP frame.
 // Standard header = 6 bytes. Extended header (relay) = 14 bytes.
@@ -209,6 +226,22 @@ func BuildUserDataEnvelope(payload []byte) []byte {
 	return buf
 }
 
+// BuildUserDataEnvelopeWithResponse wraps an app payload in the native envelope
+// used by IoTVideoPlayerImpl::sendUserData(..., sequence=true).
+// Format: ff ff ff 88 00 03 <lenLE> <20 zero bytes> <payload>
+func BuildUserDataEnvelopeWithResponse(payload []byte) []byte {
+	buf := make([]byte, 28+len(payload))
+	buf[0] = userDataMagic0
+	buf[1] = userDataMagic1
+	buf[2] = userDataMagic2
+	buf[3] = userDataMagic3
+	buf[4] = userDataInnerTarget
+	buf[5] = userDataInnerTypeEx
+	binary.LittleEndian.PutUint16(buf[6:8], uint16(len(payload)))
+	copy(buf[28:], payload)
+	return buf
+}
+
 // BuildUserDataPayload wraps a native user-data envelope into the CTRL KCP frame
 // format used by iv_send_cmd_ringbuf.
 // Format: type=0x02, flags=0x02, total_len=<len+4>, RC5(payload)
@@ -222,6 +255,134 @@ func BuildUserDataPayload(payload []byte, rc5Key *RC5Key) []byte {
 		for off := 4; off+8 <= len(buf); off += 8 {
 			rc5Key.EncryptBlock(buf[off : off+8])
 		}
+	}
+	return buf
+}
+
+// BuildDataPayload wraps payload into the DATA-channel TLV format used by
+// giot_eif_send_data and av-send traffic.
+func BuildDataPayload(payload []byte, rc5Key *RC5Key) []byte {
+	return BuildDataPayloadWithFlags(payload, dataOuterFlags, rc5Key)
+}
+
+func BuildDataPayloadWithFlags(payload []byte, flags byte, rc5Key *RC5Key) []byte {
+	buf := make([]byte, 4+len(payload))
+	buf[0] = dataOuterType
+	buf[1] = flags
+	binary.LittleEndian.PutUint16(buf[2:4], uint16(len(buf)))
+	copy(buf[4:], payload)
+	if rc5Key != nil {
+		for off := 4; off+8 <= len(buf); off += 8 {
+			rc5Key.EncryptBlock(buf[off : off+8])
+		}
+	}
+	return buf
+}
+
+// BuildPlayerUserDataHeader matches the Java IoTVideoPlayer.addHeader(...) helper.
+// It prefixes a command payload with an 8-byte player header.
+func BuildPlayerUserDataHeader(kind, cmd, cameraID byte, timestamp uint32, payload []byte) []byte {
+	buf := make([]byte, 8+len(payload))
+	buf[0] = kind
+	buf[1] = cmd
+	buf[2] = cameraID
+	binary.LittleEndian.PutUint32(buf[4:8], timestamp)
+	copy(buf[8:], payload)
+	return buf
+}
+
+// BuildGWELLPackedAVHeader20 serializes the 20-byte header copied by
+// IoTVideoPlayerImpl::setCaptureHeader into avctl_start_enc_and_send.
+func BuildGWELLPackedAVHeader20(header GWELLAVHeader) []byte {
+	buf := make([]byte, 20)
+	buf[0] = byte(header.AudioType)
+	buf[1] = byte(header.AudioCodecOption)
+	buf[2] = byte(header.AudioMode)
+	buf[3] = byte(header.AudioBitWidth)
+	binary.LittleEndian.PutUint32(buf[4:8], header.AudioSampleRate)
+	binary.LittleEndian.PutUint16(buf[8:10], uint16(header.AudioSamplesPerFrame))
+	buf[10] = byte(header.VideoType)
+	buf[11] = byte(header.FrameRate)
+	binary.LittleEndian.PutUint32(buf[12:16], header.Width)
+	binary.LittleEndian.PutUint32(buf[16:20], header.Height)
+	return buf
+}
+
+// BuildGWELLAVHeaderPacket builds the packet-type 0x01 AV header frame used by
+// the native talkback sender before audio data starts flowing.
+func BuildGWELLAVHeaderPacket(headerFlags byte, packedHeader20 []byte) ([]byte, error) {
+	if len(packedHeader20) < 20 {
+		return nil, fmt.Errorf("packed header must be 20 bytes, got %d", len(packedHeader20))
+	}
+
+	buf := make([]byte, 28)
+	buf[0] = userDataMagic0
+	buf[1] = userDataMagic1
+	buf[2] = userDataMagic2
+	buf[3] = userDataMagic3
+	buf[4] = headerFlags
+	buf[5] = 0x01
+	copy(buf[8:], packedHeader20[:20])
+	return buf, nil
+}
+
+// BuildGWELLAVAudioPacket builds a packet-type 0x00 AV payload with an audio
+// length table followed by concatenated encoded audio frames and optional video.
+func BuildGWELLAVAudioPacket(headerFlags byte, audioFrames [][]byte, video []byte, videoPTS, audioPTS uint64) []byte {
+	audioCount := len(audioFrames)
+	lensBytes := audioCount * 2
+	audioLen := 0
+	for _, frame := range audioFrames {
+		audioLen += len(frame)
+	}
+
+	total := 28 + lensBytes + audioLen + len(video)
+	buf := make([]byte, total)
+	buf[0] = userDataMagic0
+	buf[1] = userDataMagic1
+	buf[2] = userDataMagic2
+	buf[3] = userDataMagic3
+	buf[4] = headerFlags
+	buf[5] = 0x00
+	binary.LittleEndian.PutUint16(buf[6:8], uint16(audioCount))
+	binary.LittleEndian.PutUint32(buf[8:12], uint32(len(video)))
+	binary.LittleEndian.PutUint64(buf[12:20], videoPTS)
+	binary.LittleEndian.PutUint64(buf[20:28], audioPTS)
+
+	off := 28
+	for _, frame := range audioFrames {
+		binary.LittleEndian.PutUint16(buf[off:off+2], uint16(len(frame)))
+		off += 2
+	}
+	for _, frame := range audioFrames {
+		copy(buf[off:], frame)
+		off += len(frame)
+	}
+	copy(buf[off:], video)
+	return buf
+}
+
+// BuildGWELLAVAudioPacketHeader builds only the 28-byte packet-type 0x00 AV header.
+func BuildGWELLAVAudioPacketHeader(headerFlags byte, audioCount int, videoLen int, videoPTS, audioPTS uint64) []byte {
+	buf := make([]byte, 28)
+	buf[0] = userDataMagic0
+	buf[1] = userDataMagic1
+	buf[2] = userDataMagic2
+	buf[3] = userDataMagic3
+	buf[4] = headerFlags
+	buf[5] = 0x00
+	binary.LittleEndian.PutUint16(buf[6:8], uint16(audioCount))
+	binary.LittleEndian.PutUint32(buf[8:12], uint32(videoLen))
+	binary.LittleEndian.PutUint64(buf[12:20], videoPTS)
+	binary.LittleEndian.PutUint64(buf[20:28], audioPTS)
+	return buf
+}
+
+// BuildGWELLAVAudioLengthTable builds the 2-byte LE length table for audio frames.
+func BuildGWELLAVAudioLengthTable(audioFrames [][]byte) []byte {
+	buf := make([]byte, len(audioFrames)*2)
+	for i, frame := range audioFrames {
+		binary.LittleEndian.PutUint16(buf[i*2:i*2+2], uint16(len(frame)))
 	}
 	return buf
 }
