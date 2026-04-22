@@ -476,8 +476,6 @@ func (s *Session) networkDetect() {
 		return
 	}
 	token := s.cfg.Token
-	result := s.certResult
-	buf := make([]byte, 8192)
 
 	ourLanIP := GetOutboundIP(s.cfg.CameraLanIP)
 	if ourLanIP == nil {
@@ -488,21 +486,8 @@ func (s *Session) networkDetect() {
 		s.targetDev.TID, s.pwdKey, ourLanIP.String(), 5, 3000)
 	s.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	s.conn.Write(detectProbe)
-	log.Printf("%s sent network detect probe (LAN IP=%s)", s.prefix, ourLanIP)
-
-	// Wait 5 seconds for camera to process
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		s.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-		n, err := s.conn.Read(buf)
-		if err != nil {
-			continue
-		}
-		decrypted, mode := TryDecrypt(buf, n, result.SessionKey, s.pwdKey)
-		if decrypted != nil {
-			log.Printf("%s network detect resp: sub=0x%02X (%s)", s.prefix, decrypted[1], mode)
-		}
-	}
+	s.conn.SetWriteDeadline(time.Time{})
+	log.Printf("%s sent network detect probe (LAN IP=%s, non-blocking)", s.prefix, ourLanIP)
 }
 
 // subscribe sends DevID and token-based subscribe messages.
@@ -684,6 +669,16 @@ func (s *Session) calling() error {
 		}
 	}
 
+	// Fast path: when we already have a camera LAN IP, try a short LAN-only KCP bring-up
+	// before spending time on relay discovery and full probe setup.
+	if s.cfg.CameraLanIP != "" && len(s.lanMTPAddrs) > 0 {
+		if s.fastLanProbe(peerOuterPort) {
+			s.setupTransport(nil, 0, nil, 0, make(chan net.Conn))
+			s.state = StateTransfer
+			return nil
+		}
+	}
+
 	// Send MTP_RES_REQUEST
 	mtpResReq := BuildMTPResRequest(token, s.linkID, s.targetDev.TID,
 		s.routingSessionID, result.SessionKey, s.pwdKey)
@@ -703,6 +698,70 @@ func (s *Session) calling() error {
 
 	s.state = StateTransfer
 	return nil
+}
+
+func (s *Session) fastLanProbe(peerOuterPort uint16) bool {
+	if s.pc == nil || len(s.lanMTPAddrs) == 0 {
+		return false
+	}
+
+	token := s.cfg.Token
+	buf := make([]byte, 8192)
+	portStatReq := BuildPortStatReq(token, s.routingSessionID, s.nextSqnum(), s.linkID, s.targetDev.TID, s.pwdKey)
+	detectReq := BuildDetectReq2()
+	EncryptFrameFull(detectReq, s.pwdKey)
+	earlyKCP := BuildCreateKCPSessionMsg(s.linkID, token.AccessID, s.targetDev.TID)
+	earlyFrame := BuildMTPFrame(earlyKCP, true)
+
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		for _, addr := range s.lanMTPAddrs {
+			s.pc.WriteToUDP(portStatReq, addr)
+			s.pc.WriteToUDP(earlyFrame, addr)
+			if s.cfg.CameraLanIP != "" && addr.IP.Equal(net.ParseIP(s.cfg.CameraLanIP)) {
+				s.pc.WriteToUDP(detectReq, addr)
+			}
+		}
+
+		readUntil := time.Now().Add(250 * time.Millisecond)
+		for time.Now().Before(readUntil) {
+			s.pc.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			n, fromAddr, err := s.pc.ReadFromUDP(buf)
+			if err != nil {
+				break
+			}
+			if fromAddr == nil || !isCameraLanIP(fromAddr.IP) {
+				continue
+			}
+
+			if buf[0] == 0xC0 {
+				s.addLanMTPAddr(fromAddr)
+				if s.bestLanAddr == nil {
+					s.bestLanAddr = &net.UDPAddr{IP: append(net.IP(nil), fromAddr.IP...), Port: fromAddr.Port}
+				}
+				if peerOuterPort == 0 || fromAddr.Port == int(peerOuterPort) || fromAddr.Port == 6789 || fromAddr.Port == 32761 || fromAddr.Port == 32100 {
+					log.Printf("%s fast LAN probe locked bestLanAddr: %s", s.prefix, s.bestLanAddr)
+					return true
+				}
+				continue
+			}
+
+			decrypted, _ := TryDecrypt(buf, n, s.certResult.SessionKey, s.pwdKey)
+			if decrypted == nil {
+				continue
+			}
+			if decrypted[1] == 0xCA || decrypted[1] == 0xCB || decrypted[1] == 0x02 {
+				s.addLanMTPAddr(fromAddr)
+				if s.bestLanAddr == nil {
+					s.bestLanAddr = &net.UDPAddr{IP: append(net.IP(nil), fromAddr.IP...), Port: fromAddr.Port}
+				}
+				log.Printf("%s fast LAN probe found camera addr: %s", s.prefix, s.bestLanAddr)
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // startRelayActivation launches background goroutines for relay port activation.
