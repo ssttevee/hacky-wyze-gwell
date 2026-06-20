@@ -1427,6 +1427,10 @@ func (s *Session) streamLoop() error {
 	initDeadline := time.Now().Add(60 * time.Second)
 
 	for retry := 0; !acceptReceived && time.Now().Before(initDeadline); retry++ {
+		if s.isClosed() {
+			return fmt.Errorf("INITREQ: session closed")
+		}
+
 		// Check for late TCP relay
 		if s.tcpRelay == nil {
 			select {
@@ -1455,6 +1459,9 @@ func (s *Session) streamLoop() error {
 
 		deadline := time.Now().Add(500 * time.Millisecond)
 		for time.Now().Before(deadline) {
+			if s.isClosed() {
+				return fmt.Errorf("INITREQ: session closed during receive")
+			}
 			remaining := time.Until(deadline)
 			if remaining < 10*time.Millisecond {
 				remaining = 10 * time.Millisecond
