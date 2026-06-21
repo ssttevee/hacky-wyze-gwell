@@ -160,6 +160,7 @@ type Session struct {
 	lastDataFrom    string
 	bestLanAddr     *net.UDPAddr // best LAN address for KCP output (camera's actual IP:port)
 	meterRound      uint32       // per-session meter probe round counter
+	lanConfirmed    bool         // true when fastLanProbe successfully confirmed LAN connectivity
 
 	// Diagnostics
 	rawUDPPkts    int64     // total raw UDP packets received during streaming
@@ -673,10 +674,16 @@ func (s *Session) calling() error {
 	// before spending time on relay discovery and full probe setup.
 	if s.cfg.CameraLanIP != "" && len(s.lanMTPAddrs) > 0 {
 		if s.fastLanProbe(peerOuterPort) {
+			s.lanConfirmed = true
 			s.setupTransport(nil, 0, nil, 0, make(chan net.Conn))
 			s.state = StateTransfer
 			return nil
 		}
+		// fastLanProbe failed — clear speculative lanMTPAddrs so relay fallback is used.
+		// LAN addresses were built from the configured CameraLanIP, not from actual
+		// camera discovery, so they're not reliable over non-local links (e.g. VPN).
+		s.lanMTPAddrs = nil
+		s.bestLanAddr = nil
 	}
 
 	// Send MTP_RES_REQUEST
@@ -1114,7 +1121,9 @@ func (s *Session) setupTransport(callingRelayIP net.IP, callingRelayPort uint16,
 	}
 
 	// Prefer LAN direct when camera is reachable on LAN.
-	// TCP relay goes through Wyze's servers and has session timeouts (~2-3 min).
+	// When fastLanProbe failed we already cleared speculative lanMTPAddrs,
+	// so any remaining addresses came from actual camera discovery during
+	// probeAndWait and are trustworthy.
 	if len(s.lanMTPAddrs) > 0 {
 		// Close any pending TCP relay — we don't need it
 		select {
