@@ -685,12 +685,11 @@ func decodeGWELLAVPayload(avPayload []byte, decoded *DecodedPayload) bool {
 	decoded.PacketType = packetType
 	decoded.Payload = append([]byte(nil), avPayload...)
 	decoded.IsHeadInfo = true
-	decoded.Video = append([]byte(nil), avPayload[28:]...)
 
 	switch packetType {
 	case 0x01:
 		// head_info carries codec parameters, not video data
-		decoded.Video = nil
+		decoded.Video = []byte{}
 		if len(avPayload) >= 28 {
 			decoded.HeaderFlags = avPayload[4]
 			decoded.AudioType = avPayload[8]
@@ -747,10 +746,9 @@ func decodeGWELLAVPayload(avPayload []byte, decoded *DecodedPayload) bool {
 			}
 		}
 		if videoLen > 0 && off+videoLen <= len(avPayload) {
-			decoded.Video = append(decoded.Video[:0], avPayload[off:off+videoLen]...)
+			decoded.Video = append([]byte(nil), avPayload[off:off+videoLen]...)
 		} else {
-			// audio-only packet — no video data to extract
-			decoded.Video = nil
+			decoded.Video = []byte{}
 		}
 		return true
 	default:
