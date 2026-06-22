@@ -1777,8 +1777,12 @@ func (s *Session) drainKCPRecv() {
 			if s.cfg.RawDataHandler != nil {
 				s.cfg.RawDataHandler(decoded)
 			}
-			if decoded.Video != nil && s.cfg.H264Writer != nil {
-				s.cfg.H264Writer.Write(decoded.Video)
+			if s.cfg.H264Writer != nil {
+				if decoded.Video != nil {
+					s.cfg.H264Writer.Write(decoded.Video)
+				} else {
+					s.cfg.H264Writer.Write([]byte{})
+				}
 			}
 		}
 	}

@@ -688,8 +688,6 @@ func decodeGWELLAVPayload(avPayload []byte, decoded *DecodedPayload) bool {
 
 	switch packetType {
 	case 0x01:
-		// head_info carries codec parameters, not video data
-		decoded.Video = []byte{}
 		if len(avPayload) >= 28 {
 			decoded.HeaderFlags = avPayload[4]
 			decoded.AudioType = avPayload[8]
@@ -747,11 +745,11 @@ func decodeGWELLAVPayload(avPayload []byte, decoded *DecodedPayload) bool {
 		}
 		if videoLen > 0 && off+videoLen <= len(avPayload) {
 			decoded.Video = append([]byte(nil), avPayload[off:off+videoLen]...)
-		} else {
-			decoded.Video = []byte{}
 		}
+		decoded.Video = stripEmbeddedGWELLWrappers(decoded.Video)
 		return true
 	default:
+		decoded.Video = stripEmbeddedGWELLWrappers(decoded.Video)
 		return true
 	}
 }
@@ -809,6 +807,7 @@ func DecodeMTPPayload(data []byte, rc5Key *RC5Key, channel string) *DecodedPaylo
 		} else if len(avPayload) > 0 {
 			decoded.Video = append([]byte(nil), avPayload...)
 		}
+		decoded.Video = stripEmbeddedGWELLWrappers(decoded.Video)
 		return decoded
 	}
 
@@ -827,6 +826,21 @@ func DecryptMTPPayload(data []byte, rc5Key *RC5Key, channel string) []byte {
 		return nil
 	}
 	return decoded.Video
+}
+
+// stripEmbeddedGWELLWrappers removes any trailing GWELL wrapper bytes
+// (0xFFFFFF88 audio frame-length tables, raw PCM, etc.) embedded within
+// otherwise-valid H.264 data from multiplexed KCP payloads.
+func stripEmbeddedGWELLWrappers(video []byte) []byte {
+	if len(video) <= 28 {
+		return video
+	}
+	for i := 0; i <= len(video)-4; i++ {
+		if video[i] == 0xFF && video[i+1] == 0xFF && video[i+2] == 0xFF && video[i+3] == 0x88 {
+			return video[:i]
+		}
+	}
+	return video
 }
 
 // ParseMTPForAVSTREAMCTL parses an MTP frame for AVSTREAMCTL commands.
