@@ -685,7 +685,6 @@ func decodeGWELLAVPayload(avPayload []byte, decoded *DecodedPayload) bool {
 	decoded.PacketType = packetType
 	decoded.Payload = append([]byte(nil), avPayload...)
 	decoded.IsHeadInfo = true
-	decoded.Video = append([]byte(nil), avPayload[28:]...)
 
 	switch packetType {
 	case 0x01:
@@ -745,7 +744,11 @@ func decodeGWELLAVPayload(avPayload []byte, decoded *DecodedPayload) bool {
 			}
 		}
 		if videoLen > 0 && off+videoLen <= len(avPayload) {
-			decoded.Video = append(decoded.Video[:0], avPayload[off:off+videoLen]...)
+			decoded.Video = append([]byte(nil), avPayload[off:off+videoLen]...)
+		} else {
+			// Audio-only DATA packet: keep Video non-nil so drainKCPRecv
+			// calls Write() to fire Broadcast() and keep session alive.
+			decoded.Video = []byte{}
 		}
 		return true
 	default:
